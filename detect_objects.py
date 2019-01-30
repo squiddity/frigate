@@ -18,54 +18,59 @@ RTSP_URL = os.getenv('RTSP_URL')
 PATH_TO_CKPT = '/frozen_inference_graph.pb'
 
 # List of the strings that is used to add correct label for each box.
-PATH_TO_LABELS = '/label_map.pbtext'
+PB_TEXT = '/label_map.pbtext'
 
-# TODO: make dynamic?
-NUM_CLASSES = 90
+# Pretrained classes in the model
+classNames = {0: 'background',
+              1: 'person', 2: 'bicycle', 3: 'car', 4: 'motorcycle', 5: 'airplane', 6: 'bus',
+              7: 'train', 8: 'truck', 9: 'boat', 10: 'traffic light', 11: 'fire hydrant',
+              13: 'stop sign', 14: 'parking meter', 15: 'bench', 16: 'bird', 17: 'cat',
+              18: 'dog', 19: 'horse', 20: 'sheep', 21: 'cow', 22: 'elephant', 23: 'bear',
+              24: 'zebra', 25: 'giraffe', 27: 'backpack', 28: 'umbrella', 31: 'handbag',
+              32: 'tie', 33: 'suitcase', 34: 'frisbee', 35: 'skis', 36: 'snowboard',
+              37: 'sports ball', 38: 'kite', 39: 'baseball bat', 40: 'baseball glove',
+              41: 'skateboard', 42: 'surfboard', 43: 'tennis racket', 44: 'bottle',
+              46: 'wine glass', 47: 'cup', 48: 'fork', 49: 'knife', 50: 'spoon',
+              51: 'bowl', 52: 'banana', 53: 'apple', 54: 'sandwich', 55: 'orange',
+              56: 'broccoli', 57: 'carrot', 58: 'hot dog', 59: 'pizza', 60: 'donut',
+              61: 'cake', 62: 'chair', 63: 'couch', 64: 'potted plant', 65: 'bed',
+              67: 'dining table', 70: 'toilet', 72: 'tv', 73: 'laptop', 74: 'mouse',
+              75: 'remote', 76: 'keyboard', 77: 'cell phone', 78: 'microwave', 79: 'oven',
+              80: 'toaster', 81: 'sink', 82: 'refrigerator', 84: 'book', 85: 'clock',
+              86: 'vase', 87: 'scissors', 88: 'teddy bear', 89: 'hair drier', 90: 'toothbrush'}
 
-# Loading label map
-label_map = label_map_util.load_labelmap(PATH_TO_LABELS)
-categories = label_map_util.convert_label_map_to_categories(label_map, max_num_classes=NUM_CLASSES,
-                                                            use_display_name=True)
-category_index = label_map_util.create_category_index(categories)
+
+def id_class_name(class_id, classes):
+    for key, value in classes.items():
+        if class_id == key:
+            return value
+
+model = cv2.dnn.readNetFromTensorflow(PATH_TO_CKPT, PB_TEXT)
 
 def detect_objects(image_np, sess, detection_graph):
-    # Expand dimensions since the model expects images to have shape: [1, None, None, 3]
-    image_np_expanded = np.expand_dims(image_np, axis=0)
-    image_tensor = detection_graph.get_tensor_by_name('image_tensor:0')
+    image_height, image_width, _ = image_np.shape
 
-    # Each box represents a part of the image where a particular object was detected.
-    boxes = detection_graph.get_tensor_by_name('detection_boxes:0')
-
-    # Each score represent how level of confidence for each of the objects.
-    # Score is shown on the result image, together with the class label.
-    scores = detection_graph.get_tensor_by_name('detection_scores:0')
-    classes = detection_graph.get_tensor_by_name('detection_classes:0')
-    num_detections = detection_graph.get_tensor_by_name('num_detections:0')
+    model.setInput(cv2.dnn.blobFromImage(image_np, size=(300, 300), swapRB=True))
 
     # Actual detection.
-    (boxes, scores, classes, num_detections) = sess.run(
-        [boxes, scores, classes, num_detections],
-        feed_dict={image_tensor: image_np_expanded})
+    output = model.forward()
 
-    # build an array of detected objects
     objects = []
-    for index, value in enumerate(classes[0]):
-        object_dict = {}
-        if scores[0, index] > 0.5:
-            object_dict[(category_index.get(value)).get('name').encode('utf8')] = \
-                                scores[0, index]
+    for detection in output[0, 0, :, :]:
+        confidence = detection[2]
+        if confidence > .5:
+            object_dict = {}
+            class_id = detection[1]
+            class_name=id_class_name(class_id,classNames)
+            object_dict[class_name] = confidence
             objects.append(object_dict)
-
-    # draw boxes for detected objects on image
-    vis_util.visualize_boxes_and_labels_on_image_array(
-        image_np,
-        np.squeeze(boxes),
-        np.squeeze(classes).astype(np.int32),
-        np.squeeze(scores),
-        category_index,
-        use_normalized_coordinates=True,
-        line_thickness=4)
+            # print(str(str(class_id) + " " + str(detection[2])  + " " + class_name))
+            box_x = detection[3] * image_width
+            box_y = detection[4] * image_height
+            box_width = detection[5] * image_width
+            box_height = detection[6] * image_height
+            cv2.rectangle(image_np, (int(box_x), int(box_y)), (int(box_width), int(box_height)), (23, 230, 210), thickness=4)
+            cv2.putText(image_np,class_name ,(int(box_x), int(box_y+.05*image_height)),cv2.FONT_HERSHEY_SIMPLEX,(.005*image_width),(0, 0, 255))
 
     return objects, image_np
 
@@ -171,16 +176,6 @@ def process_frames(shared_arr, shared_output_arr, shared_frame_time, frame_shape
     # shape shared output array into frame so it can be copied into
     output_arr = tonumpyarray(shared_output_arr).reshape(frame_shape)
 
-    # Load a (frozen) Tensorflow model into memory before the processing loop
-    detection_graph = tf.Graph()
-    with detection_graph.as_default():
-        od_graph_def = tf.GraphDef()
-        with tf.gfile.GFile(PATH_TO_CKPT, 'rb') as fid:
-            serialized_graph = fid.read()
-            od_graph_def.ParseFromString(serialized_graph)
-            tf.import_graph_def(od_graph_def, name='')
-        sess = tf.Session(graph=detection_graph)
-
     no_frames_available = -1
     while True:
         # if there isnt a frame ready for processing
@@ -210,10 +205,8 @@ def process_frames(shared_arr, shared_output_arr, shared_frame_time, frame_shape
         # signal that the frame has been used so a new one will be ready
         shared_frame_time.value = 0.0
 
-        # convert to RGB
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         # do the object detection
-        objects, frame_overlay = detect_objects(frame_rgb, sess, detection_graph)
+        objects, frame_overlay = detect_objects(frame, sess, detection_graph)
         # copy the output frame with the bounding boxes to the output array
         output_arr[:] = frame_overlay
         if(len(objects) > 0):
