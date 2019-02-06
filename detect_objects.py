@@ -45,34 +45,23 @@ def id_class_name(class_id, classes):
         if class_id == key:
             return value
 
-model = cv2.dnn.readNetFromTensorflow(PATH_TO_CKPT, PB_TEXT)
+def detect_objects(cvNet, image_np):
+    rows = image_np.shape[0]
+    cols = image_np.shape[1]
+    img_8 = (image_np/256).astype('uint8')
+    cvNet.setInput(cv2.dnn.blobFromImage(img_8, size=(300, 300), swapRB=False, crop=False))
+    cvOut = cvNet.forward()
 
-def detect_objects(image_np, sess, detection_graph):
-    image_height, image_width, _ = image_np.shape
+    for detection in cvOut[0,0,:,:]:
+        score = float(detection[2])
+        if score > 0.3:
+            left = detection[3] * cols
+            top = detection[4] * rows
+            right = detection[5] * cols
+            bottom = detection[6] * rows
+            cv2.rectangle(image_np, (int(left), int(top)), (int(right), int(bottom)), (23, 230, 210), thickness=2)
 
-    model.setInput(cv2.dnn.blobFromImage(image_np, size=(300, 300), swapRB=True))
-
-    # Actual detection.
-    output = model.forward()
-
-    objects = []
-    for detection in output[0, 0, :, :]:
-        confidence = detection[2]
-        if confidence > .5:
-            object_dict = {}
-            class_id = detection[1]
-            class_name=id_class_name(class_id,classNames)
-            object_dict[class_name] = confidence
-            objects.append(object_dict)
-            # print(str(str(class_id) + " " + str(detection[2])  + " " + class_name))
-            box_x = detection[3] * image_width
-            box_y = detection[4] * image_height
-            box_width = detection[5] * image_width
-            box_height = detection[6] * image_height
-            cv2.rectangle(image_np, (int(box_x), int(box_y)), (int(box_width), int(box_height)), (23, 230, 210), thickness=4)
-            cv2.putText(image_np,class_name ,(int(box_x), int(box_y+.05*image_height)),cv2.FONT_HERSHEY_SIMPLEX,(.005*image_width),(0, 0, 255))
-
-    return objects, image_np
+    return image_np
 
 def main():
     # capture a single frame and check the frame shape so the correct array
@@ -175,6 +164,7 @@ def process_frames(shared_arr, shared_output_arr, shared_frame_time, frame_shape
     arr = tonumpyarray(shared_arr).reshape(frame_shape)
     # shape shared output array into frame so it can be copied into
     output_arr = tonumpyarray(shared_output_arr).reshape(frame_shape)
+    model = cv2.dnn.readNetFromTensorflow(PATH_TO_CKPT, PB_TEXT)
 
     no_frames_available = -1
     while True:
@@ -206,11 +196,9 @@ def process_frames(shared_arr, shared_output_arr, shared_frame_time, frame_shape
         shared_frame_time.value = 0.0
 
         # do the object detection
-        objects, frame_overlay = detect_objects(frame, sess, detection_graph)
+        frame_overlay = detect_objects(model, frame)
         # copy the output frame with the bounding boxes to the output array
         output_arr[:] = frame_overlay
-        if(len(objects) > 0):
-            print(objects)
 
 if __name__ == '__main__':
     mp.freeze_support()
