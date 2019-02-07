@@ -20,9 +20,29 @@ PATH_TO_CKPT = '/frozen_inference_graph.pb'
 
 # List of the strings that is used to add correct label for each box.
 PATH_TO_LABELS = '/label_map.pbtext'
+#PATH_TO_LABELS = 'opencv_ssd_graph.pbtxt'
 
 # TODO: make dynamic?
 NUM_CLASSES = 90
+
+# Pretrained classes in the model
+classNames = {0: 'background',
+              1: 'person', 2: 'bicycle', 3: 'car', 4: 'motorcycle', 5: 'airplane', 6: 'bus',
+              7: 'train', 8: 'truck', 9: 'boat', 10: 'traffic light', 11: 'fire hydrant',
+              13: 'stop sign', 14: 'parking meter', 15: 'bench', 16: 'bird', 17: 'cat',
+              18: 'dog', 19: 'horse', 20: 'sheep', 21: 'cow', 22: 'elephant', 23: 'bear',
+              24: 'zebra', 25: 'giraffe', 27: 'backpack', 28: 'umbrella', 31: 'handbag',
+              32: 'tie', 33: 'suitcase', 34: 'frisbee', 35: 'skis', 36: 'snowboard',
+              37: 'sports ball', 38: 'kite', 39: 'baseball bat', 40: 'baseball glove',
+              41: 'skateboard', 42: 'surfboard', 43: 'tennis racket', 44: 'bottle',
+              46: 'wine glass', 47: 'cup', 48: 'fork', 49: 'knife', 50: 'spoon',
+              51: 'bowl', 52: 'banana', 53: 'apple', 54: 'sandwich', 55: 'orange',
+              56: 'broccoli', 57: 'carrot', 58: 'hot dog', 59: 'pizza', 60: 'donut',
+              61: 'cake', 62: 'chair', 63: 'couch', 64: 'potted plant', 65: 'bed',
+              67: 'dining table', 70: 'toilet', 72: 'tv', 73: 'laptop', 74: 'mouse',
+              75: 'remote', 76: 'keyboard', 77: 'cell phone', 78: 'microwave', 79: 'oven',
+              80: 'toaster', 81: 'sink', 82: 'refrigerator', 84: 'book', 85: 'clock',
+              86: 'vase', 87: 'scissors', 88: 'teddy bear', 89: 'hair drier', 90: 'toothbrush'}
 
 #REGIONS = "600,0,380:600,600,380:600,1200,380"
 REGIONS = os.getenv('REGIONS')
@@ -34,6 +54,32 @@ label_map = label_map_util.load_labelmap(PATH_TO_LABELS)
 categories = label_map_util.convert_label_map_to_categories(label_map, max_num_classes=NUM_CLASSES,
                                                             use_display_name=True)
 category_index = label_map_util.create_category_index(categories)
+
+def id_class_name(class_id, classes):
+    for key, value in classes.items():
+        if class_id == key:
+            return value
+
+def detect_objects_cv2(cvNet, cropped_frame, region_size, region_x_offset, region_y_offset):
+    rows = cropped_frame.shape[0]
+    cols = cropped_frame.shape[1]
+    img_8 = (cropped_frame/256).astype('uint8')
+    cvNet.setInput(cv2.dnn.blobFromImage(img_8, size=(300, 300), swapRB=False, crop=False))
+    cvOut = cvNet.forward()
+
+    objects = []
+    for detection in cvOut[0,0,:,:]:
+        score = float(detection[2])
+        if score > 0.1:
+            left = (detection[3] * cols) + region_x_offset
+            top = (detection[4] * rows) + region_y_offset
+            right = (detection[5] * cols) + region_x_offset
+            bottom = (detection[6] * rows) + region_y_offset
+            objects += [float(detection[1]), score, top, left, bottom, right]
+        if len(objects) == 60:
+            break
+
+    return objects
 
 def detect_objects(cropped_frame, sess, detection_graph, region_size, region_x_offset, region_y_offset):
     # Expand dimensions since the model expects images to have shape: [1, None, None, 3]
@@ -141,7 +187,7 @@ def main():
 
     detection_processes = []
     for index, region in enumerate(regions):
-        detection_process = mp.Process(target=process_frames, args=(shared_arr, 
+        detection_process = mp.Process(target=process_frames_cv2, args=(shared_arr, 
             shared_memory_objects[index]['output_array'], 
             shared_memory_objects[index]['frame_time'], frame_shape, 
             region['size'], region['x_offset'], region['y_offset']))
@@ -295,6 +341,53 @@ def process_frames(shared_arr, shared_output_arr, shared_frame_time, frame_shape
         cropped_frame_rgb = cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2RGB)
         # do the object detection
         objects = detect_objects(cropped_frame_rgb, sess, detection_graph, region_size, region_x_offset, region_y_offset)
+        # copy the detected objects to the output array, filling the array when needed
+        shared_output_arr[:] = objects + [0.0] * (60-len(objects))
+
+def process_frames_cv2(shared_arr, shared_output_arr, shared_frame_time, frame_shape, region_size, region_x_offset, region_y_offset):
+    # shape shared input array into frame for processing
+    arr = tonumpyarray(shared_arr).reshape(frame_shape)
+
+    model = cv2.dnn.readNetFromTensorflow(PATH_TO_CKPT, 'opencv_ssd_graph.pbtxt')
+
+    no_frames_available = -1
+    while True:
+        # if there isnt a frame ready for processing
+        if shared_frame_time.value == 0.0:
+            # save the first time there were no frames available
+            if no_frames_available == -1:
+                no_frames_available = datetime.datetime.now().timestamp()
+            # if there havent been any frames available in 30 seconds, 
+            # sleep to avoid using so much cpu if the camera feed is down
+            if no_frames_available > 0 and (datetime.datetime.now().timestamp() - no_frames_available) > 30:
+                time.sleep(1)
+                print("sleeping because no frames have been available in a while")
+            else:
+                # rest a little bit to avoid maxing out the CPU
+                time.sleep(0.01)
+            continue
+        
+        # we got a valid frame, so reset the timer
+        no_frames_available = -1
+
+        # if the frame is more than 0.5 second old, discard it
+        if (datetime.datetime.now().timestamp() - shared_frame_time.value) > 0.5:
+            # signal that we need a new frame
+            shared_frame_time.value = 0.0
+            # rest a little bit to avoid maxing out the CPU
+            time.sleep(0.01)
+            continue
+        
+        # make a copy of the cropped frame
+        cropped_frame = arr[region_y_offset:region_y_offset+region_size, region_x_offset:region_x_offset+region_size].copy()
+        frame_time = shared_frame_time.value
+        # signal that the frame has been used so a new one will be ready
+        shared_frame_time.value = 0.0
+
+        # convert to RGB
+        cropped_frame_rgb = cv2.cvtColor(cropped_frame, cv2.COLOR_BGR2RGB)
+        # do the object detection
+        objects = detect_objects_cv2(model, cropped_frame_rgb, region_size, region_x_offset, region_y_offset)
         # copy the detected objects to the output array, filling the array when needed
         shared_output_arr[:] = objects + [0.0] * (60-len(objects))
 
