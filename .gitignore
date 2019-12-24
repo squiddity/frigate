@@ -2,3 +2,4 @@
 debug
 .vscode
 config/config.yml
+*workspace
